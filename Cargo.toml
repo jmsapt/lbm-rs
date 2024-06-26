@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 bmp = "0.5.0"
+nofmt = "1.0.0"
 rand = "0.8.5"
