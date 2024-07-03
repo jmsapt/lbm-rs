@@ -1,11 +1,6 @@
 use core::{f64, panic};
-use std::{
-    isize, mem,
-    ops::{Index, IndexMut},
-    usize,
-};
+use std::{isize, usize};
 
-use rand::{seq, Rng};
 macro_rules! coords {
     ($x:expr, $y:expr) => {
         (0..$x).flat_map(|x| (0..$y).map(move |y| (x, y)))
@@ -72,9 +67,8 @@ impl Cell2D9Q {
 }
 
 /// Lattice Boltzman Method (LBM) for 2D9Q
-struct LBM2D {
+pub struct LBM2D {
     mesh: Vec<Cell2D9Q>,
-    buffer: Vec<Cell2D9Q>,
     geometry: Vec<bool>,
 
     /// Dimensinos given as (Width, Height) => (num columns, num rows)
@@ -82,11 +76,8 @@ struct LBM2D {
 
     /// Relaxation Time
     tau: f64,
-    /// Lattice Speed
-    c_s: f64,
-
-    /// Total time
-    time: f64,
+    /// Total number of timesteps
+    n_steps: usize,
     /// Time step
     delta_time: f64,
     /// Inlet Velocity
@@ -100,9 +91,20 @@ impl LBM2D {
 
     /// Construct and intialise the simulation
     /// TODO: currently hardcoded, make adjustments to parameterise this instead
-    fn new(x_count: usize, y_count: usize, delta_t: f64) -> Self {
+    pub fn new(
+        x_count: usize,
+        y_count: usize,
+        cell_size: f64,
+        inlet_c: f64,
+        inlet_velocity: (f64, f64),
+        inlet_density: f64,
+    ) -> Self {
         let mesh = (0..x_count * y_count).map(|_| Cell2D9Q::new()).collect();
-        let buffer = (0..x_count * y_count).map(|_| Cell2D9Q::new()).collect();
+
+        // As defined here
+        // <https://en.wikipedia.org/wiki/Lattice_Boltzmann_methods#Lattice_units_conversion>
+        let delta_t = cell_size / inlet_c;
+
         // Hardcoded circle
         let mut geometry = vec![false; X_COUNT * Y_COUNT];
         {
@@ -131,37 +133,76 @@ impl LBM2D {
 
         Self {
             mesh,
-            buffer,
             geometry,
             dimensions: (x_count, y_count),
             // TODO replace hard coded values
-            time: 0.0,
+            n_steps: 0,
             delta_time: delta_t,
-            c_s: 1.0,
             tau: 0.5,
-            inlet_velocity: (1.0, 0.0),
-            inlet_rho: 1.0,
+            inlet_velocity,
+            inlet_rho: inlet_density,
         }
     }
-}
-impl LBM2D {
-    fn step(&mut self, buffer: &mut Vec<Cell2D9Q>) {
-        let (x_count, y_count) = self.dimensions;
 
-        let new_timestep = coords!(self.dimensions)
-            .zip(self.buffer.iter())
-            // perform collision
-            .map(|(pos, cell)| (pos, cell))
-            // perform streaming
-            .map(|(pos, cell)| (pos, cell))
-            .map(|(_, cell)| cell)
+    pub fn step(&mut self) {
+        use rayon::prelude::*;
+
+        // 1. Find equillibrium, and collide. This will be collected into a buffer.
+        // 2. Stream particles
+        //
+        // 3. Apply boundary conditions
+        let new_timestep = (0..self.dimensions.0)
+            .flat_map(|x| (0..self.dimensions.1).map(move |y| (x, y)))
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .zip(self.mesh.par_iter())
+            .map(|(pos, cell)| {
+                // perform collision
+                let f_eq = self.incompressible_collision(&cell, pos);
+                // perform streaming
+                let f_stream = self.stream(&self.mesh, pos);
+
+                // sum result & calculate new properties
+                let mut f = [0.0; 9];
+                let mut rho = 0.0;
+                let mut u = (0.0, 0.0);
+                for i in 0..9 {
+                    // F_i(x_i + v_i \Delta t, t + \Delta t) - F_i(x_i, t)
+                    //      = -\frac{F_i(x_i, t) - F_i^eq(x_i, t)}{\tau}
+                    let simga = -(f_stream[i] - f_eq[i]) / self.tau;
+                    f[i] = f_eq[i] + f_stream[i];
+
+                    // rho = \Sigma F_i
+                    rho += f[i];
+
+                    // rho = \Sigma F_i
+                    u.0 += f[i] * DIRS[i].0 as f64;
+                    u.1 += f[i] * DIRS[i].1 as f64;
+                }
+                u = (u.0 / rho, u.1 / rho);
+
+                Cell2D9Q {
+                    f,
+                    rho,
+                    velocity: u,
+                }
+            })
             .collect::<Vec<_>>();
-        // self.collision(buffer);
-        // // performing streaming step
-        // self.collision(buffer);
 
-        // swap buffer and mesh
-        mem::swap(buffer, &mut self.mesh);
+        self.mesh = new_timestep;
+        self.n_steps += 1;
+    }
+
+    /// Get cell density
+    pub fn get_density(&self, x: usize, y: usize) -> f64 {
+        let i = self.index(x, y);
+        self.mesh[i].rho
+    }
+
+    /// Get cell velocity
+    pub fn get_velocity(&self, x: usize, y: usize) -> (f64, f64) {
+        let i = self.index(x, y);
+        self.mesh[i].velocity
     }
 
     /// Performs incompressible collision, seting new_cell's density distributions to f^eq
@@ -189,56 +230,40 @@ impl LBM2D {
 
     fn stream(&self, cells: &Vec<Cell2D9Q>, pos: (usize, usize)) -> [f64; 9] {
         let (x, y) = pos;
-        let rho = self.buffer[self.index(x, y)].rho;
-        let f = &self.buffer[self.index(x, y)].f;
         let (x_limit, y_limit) = (self.dimensions.0 - 1, self.dimensions.1 - 1);
 
+        let rho = self.mesh[self.index(x, y)].rho;
+        let rho_in = self.inlet_rho;
+        let f = &self.mesh[self.index(x, y)].f;
+        let u_wall = (0.0, 0.0);
+
         // for each direction:
+        // TODO 1. add bounceback for geometry
+        // TODO 2. handle corner cases
         if x == 0 {
             // Inlet (left wall)
-            let (u_x, u_y) = self.inlet_velocity;
+            let u = self.inlet_velocity;
 
-            let f_1 = f[3] + 2.0 / 3.0 * rho * u_x;
-            let f_5 =
-                f[7] + 1.0 / 2.0 * (f[2] - f[4]) - 1.0 / 2.0 * rho * u_y + 1.0 / 6.0 * rho * u_x;
-            let f_8 =
-                f[6] - 1.0 / 2.0 * (f[4] - f[2]) + 1.0 / 2.0 * rho * u_y + 1.0 / 6.0 * rho * u_x;
-
-            [0.0, f_1, 0.0, 0.0, 0.0, f_5, 0.0, 0.0, f_8]
+            fixed_velocity_boundary(1, f, rho_in, u)
         } else if x == x_limit {
             // 0 Pressure case
             // Outlet (right wall)
-            let rho_in = self.inlet_rho;
-            let u_y = 0;
 
             // Solve for outlet velocity
             let u_x = 1.0 - (f[0] + f[2] + f[4] + f[1] + f[5] + f[8]) / rho_in;
+            let u = (u_x, 0.0);
 
-            todo!()
+            fixed_velocity_boundary(4, f, rho_in, u)
         } else if y == 0 {
             // Top Wall
             // Only 2, 5, 6 point back into the fluid
-            let (u_x, u_y) = (0.0, 0.0);
-
-            let f_4 = f[2] + 2.0 / 3.0 * rho / u_y;
-            let f_7 =
-                f[5] + 1.0 / 2.0 * (f[1] - f[3]) - 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y;
-            let f_8 =
-                f[6] - 1.0 / 2.0 * (f[1] - f[3]) + 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y;
-
-            [0.0, 0.0, 0.0, 0.0, f_4, 0.0, 0.0, f_7, f_8]
+            // noraml is 4
+            fixed_velocity_boundary(4, f, rho, u_wall)
         } else if y == y_limit {
             // Bottom Wall
             // Only 2, 5, 6 point back into the fluid
-            let (u_x, u_y) = (0.0, 0.0);
-
-            let f_2 = f[4] + 2.0 / 3.0 * rho / u_y;
-            let f_5 =
-                f[7] - 1.0 / 2.0 * (f[1] - f[3]) + 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y;
-            let f_6 =
-                f[8] + 1.0 / 2.0 * (f[1] - f[3]) - 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y;
-
-            [0.0, 0.0, f_2, 0.0, 0.0, f_5, f_6, 0.0, 0.0]
+            // normal is 2
+            fixed_velocity_boundary(2, f, rho, u_wall)
         } else {
             // Normal case
             nofmt::pls!([
@@ -257,150 +282,66 @@ impl LBM2D {
             ])
         }
     }
-
-    fn fixed_velocity_boundary(i: usize, f: &[f64; 9], rho: f64, u: (f64, f64)) -> [f64; 9]{
-        let (u_x, u_y) = u;
-        match i {
-            1 => {
-                // Left Wall: Only 1, 5, 8 point back into the fluid
-                [
-                    0.0,
-                    f[3] + 2.0 / 3.0 * rho * u_x,
-                    0.0,
-                    0.0,
-                    0.0,
-                    f[7] + 1.0 / 2.0 * (f[2] - f[4]) - 1.0 / 2.0 * rho * u_y
-                        + 1.0 / 6.0 * rho * u_x,
-                    0.0,
-                    0.0,
-                    f[6] - 1.0 / 2.0 * (f[4] - f[2])
-                        + 1.0 / 2.0 * rho * u_y
-                        + 1.0 / 6.0 * rho * u_x,
-                ]
-            }
-            2 => {
-                // Top Wall: Only 4, 7, 8 point back into the fluid
-                [
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    f[2] + 2.0 / 3.0 * rho / u_y,
-                    0.0,
-                    0.0,
-                    f[7] - 1.0 / 2.0 * (f[1] - f[3])
-                        + 1.0 / 2.0 * rho * u_x
-                        + 1.0 / 6.0 * rho * u_y,
-                    f[6] + 1.0 / 2.0 * (f[1] - f[3]) - 1.0 / 2.0 * rho * u_x
-                        + 1.0 / 6.0 * rho * u_y,
-                ]
-            }
-            3 => {
-                // Right Wall: Only 1, 5, 8 point back into the fluid
-                [
-                    0.0,
-                    f[3] - 2.0 / 3.0 * rho * u_x,
-                    0.0,
-                    0.0,
-                    0.0,
-                    f[7] + 1.0 / 2.0 * (f[2] - f[4])
-                        - 1.0 / 2.0 * rho * u_y
-                        - 1.0 / 6.0 * rho * u_x,
-                    0.0,
-                    0.0,
-                    f[6] - 1.0 / 2.0 * (f[4] - f[2]) + 1.0 / 2.0 * rho * u_y
-                        - 1.0 / 6.0 * rho * u_x,
-                ]
-            }
-            4 => {
-                // Bottom Wall: Only 2, 5, 6 point back into the fluid
-                [
-                    0.0,
-                    0.0,
-                    f[4] + 2.0 / 3.0 * rho / u_y,
-                    0.0,
-                    0.0,
-                    f[7] - 1.0 / 2.0 * (f[1] - f[3])
-                        + 1.0 / 2.0 * rho * u_x
-                        + 1.0 / 6.0 * rho * u_y,
-                    f[8] + 1.0 / 2.0 * (f[1] - f[3]) - 1.0 / 2.0 * rho * u_x
-                        + 1.0 / 6.0 * rho * u_y,
-                    0.0,
-                    0.0,
-                ]
-            }
-            _ => panic!("Invalid used of boundary condition function"), // Default: No bounce-back for other directions
+}
+fn fixed_velocity_boundary(i: usize, f: &[f64; 9], rho: f64, u: (f64, f64)) -> [f64; 9] {
+    let (u_x, u_y) = u;
+    match i {
+        1 => {
+            // Left Wall: Only 1, 5, 8 point back into the fluid
+            [
+                0.0,
+                f[3] + 2.0 / 3.0 * rho * u_x,
+                0.0,
+                0.0,
+                0.0,
+                f[7] + 1.0 / 2.0 * (f[2] - f[4]) - 1.0 / 2.0 * rho * u_y + 1.0 / 6.0 * rho * u_x,
+                0.0,
+                0.0,
+                f[6] - 1.0 / 2.0 * (f[4] - f[2]) + 1.0 / 2.0 * rho * u_y + 1.0 / 6.0 * rho * u_x,
+            ]
         }
+        2 => {
+            // Top Wall: Only 4, 7, 8 point back into the fluid
+            [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                f[2] + 2.0 / 3.0 * rho / u_y,
+                0.0,
+                0.0,
+                f[7] - 1.0 / 2.0 * (f[1] - f[3]) + 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y,
+                f[6] + 1.0 / 2.0 * (f[1] - f[3]) - 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y,
+            ]
+        }
+        3 => {
+            // Right Wall: Only 1, 5, 8 point back into the fluid
+            [
+                0.0,
+                f[3] - 2.0 / 3.0 * rho * u_x,
+                0.0,
+                0.0,
+                0.0,
+                f[7] + 1.0 / 2.0 * (f[2] - f[4]) - 1.0 / 2.0 * rho * u_y - 1.0 / 6.0 * rho * u_x,
+                0.0,
+                0.0,
+                f[6] - 1.0 / 2.0 * (f[4] - f[2]) + 1.0 / 2.0 * rho * u_y - 1.0 / 6.0 * rho * u_x,
+            ]
+        }
+        4 => {
+            // Bottom Wall: Only 2, 5, 6 point back into the fluid
+            [
+                0.0,
+                0.0,
+                f[4] + 2.0 / 3.0 * rho / u_y,
+                0.0,
+                0.0,
+                f[7] - 1.0 / 2.0 * (f[1] - f[3]) + 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y,
+                f[8] + 1.0 / 2.0 * (f[1] - f[3]) - 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y,
+                0.0,
+                0.0,
+            ]
+        }
+        _ => panic!("Invalid used of boundary condition function"), // Default: No bounce-back for other directions
     }
 }
-
-// Apply collision step to the mesh
-//
-// Takes the previous mesh, returning the new mesh.
-//
-// => f_i(x, t + delta_t) = f_i(x, t) + f_i^eq(x, t) - f_i(x, t) / tau_f
-// => f_i^eq(x, t) = omega_i * rho * (1 + 3 u_i)
-// where
-// - func f is the density distribution
-// - i \in [0, 8] and is the index for the D2Q9 Lattice
-// - tau_f is characteristic timescale
-// - omega_i is the lattice weight
-// - e_i has same dimension as u (i.e. 2d)
-//
-// Note: e_i * u => u_i in this implementation.
-// fn collision(prev: &Mesh) -> Mesh {
-//     // refer back to wikipedia article (actually quite good)
-//     // <https://en.wikipedia.org/wiki/Lattice_Boltzmann_methods>
-//     let mut new = prev.clone();
-//
-//     for (x, y) in coords!(prev.dimensions) {
-//         let e = &DIRS;
-//         let u = &prev[x][y].velocity;
-//         let w = &prev[x][y].density;
-//         let rho = &prev[x][y].rho;
-//
-//         let collect: [f64; L_COUNT] = (0..L_COUNT)
-//             .map(|i| {
-//                 let e_dot_u = e[i].0 as f64 * u.0 + e[i].1 as f64 * u.1;
-//                 let u_dot_u = u.0 * u.0 + u.1 * u.1;
-//
-//                 w[i] * rho
-//                     * (1.0
-//                         + 3.0 / C.powi(2) * e_dot_u
-//                         + 9.0 / (2.0 * C.powi(4)) * e_dot_u.powi(2)
-//                         + 3.0 / (2.0 * C.powi(2)) * u_dot_u.powi(2))
-//             })
-//             .collect::<Vec<f64>>()
-//             .try_into()
-//             .unwrap();
-//     }
-//     todo!()
-// }
-
-// Applies the streaming step
-//
-// Takes the new mesh (after appling the collision step) and modifies it to stream.
-// fn streaming(prev: &Mesh, new: &mut Mesh, geometry: &Vec<bool>) {
-//     for (x, y) in coords!(new.dimensions) {
-//         for (l) in (0..L_COUNT) {
-//             let (dx, dy) = DIRS[l];
-//             let nx = x as isize + dx;
-//             let ny = y as isize + dy;
-//
-//             let (x_limit, y_limit) = (new.dimensions.0 as isize, new.dimensions.1 as isize);
-//             // TODO handle boundary conditions
-//             if (nx >= 0 && nx < x_limit) && (ny >= 0 && ny < y_limit) {
-//                 // Check geometry
-//                 if geometry[y * x_limit as usize + x] {
-//                     // flip direction
-//                     let bounce_l = (l + 4) % 8 + 1;
-//                     new[x][y].density[l] = prev[x][y].density[bounce_l];
-//                 }
-//
-//                 if (nx == 0) {}
-//
-//                 if (nx == x_limit) {}
-//             }
-//         }
-//     }
-// }

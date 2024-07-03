@@ -7,7 +7,7 @@ use std::{
 
 mod Sim2D9Q;
 
-
+use Sim2D9Q::*;
 
 
 
@@ -17,8 +17,10 @@ mod Sim2D9Q;
 fn main() {
     let time = 5.0; // seconds
     let n_steps = 1000;
+    let delta_t = time / (n_steps as f64);
 
     println!("Building meshes...");
+    let sim = LBM2D::new(500, 250, delta_t);
 
 
     for i in 0..n_steps {
