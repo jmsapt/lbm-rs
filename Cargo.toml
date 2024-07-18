@@ -6,5 +6,6 @@ edition = "2021"
 [dependencies]
 bmp = "0.5.0"
 nofmt = "1.0.0"
+plotters = "0.3.6"
 rand = "0.8.5"
 rayon = "1.10.0"
