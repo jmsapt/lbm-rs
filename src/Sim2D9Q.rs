@@ -225,35 +225,173 @@ impl LBM2D {
         let f = &self.mesh[self.index(x, y)].f;
         let u_wall = (0.0, 0.0);
 
-        // for each direction:
-        // TODO 1. add bounceback for geometry
-        // TODO 2. handle corner cases
-        if x == 0 {
+        let f = &cells[self.index(x, y)].f;
+        let rho = cells[self.index(x, y)].rho;
+        // TODO
+        // - Revist applying real boundary condition
+        // - Realised I had the signs the wrong way for y axis
+        // [ ] top left
+        // [ ] top right
+        // [ ] bottom left
+        // [ ] bottom right
+        // [ ] left
+        // [ ] right
+        // [?] top
+        // [?] bottom
+
+        // Top left
+        if x == 0 && y == 0 {
             // Inlet (left wall)
-            let u = self.inlet_velocity;
-            fixed_velocity_boundary(WallBoundary::Left, f, rho_in, u)
-        } else if x == x_limit {
+            nofmt::pls!([
+                // Zero vector
+                cells[self.index(x, y)].f[0],
+                // Carindal Vectors
+                cells[self.index(x - 1, y)].f[1],
+                cells[self.index(x, y + 1)].f[2],
+                cells[self.index(x + 1, y)].f[3],
+                cells[self.index(x, y - 1)].f[4],
+                // Diagonal Vectors
+                cells[self.index(x - 1, y + 1)].f[5],
+                cells[self.index(x + 1, y + 1)].f[6],
+                cells[self.index(x + 1, y - 1)].f[7],
+                cells[self.index(x - 1, y - 1)].f[8],
+            ])
+        }
+        // Top right
+        else if x == x_limit && y == 0 {
+            nofmt::pls!([
+                // Zero vector
+                cells[self.index(x, y)].f[0],
+                // Carindal Vectors
+                cells[self.index(x - 1, y)].f[1],
+                cells[self.index(x, y + 1)].f[2],
+                cells[self.index(x + 1, y)].f[3],
+                cells[self.index(x, y - 1)].f[4],
+                // Diagonal Vectors
+                cells[self.index(x - 1, y + 1)].f[5],
+                cells[self.index(x + 1, y + 1)].f[6],
+                cells[self.index(x + 1, y - 1)].f[7],
+                cells[self.index(x - 1, y - 1)].f[8],
+            ])
+        }
+        // Bottom left
+        else if x == 0 && y == y_limit {
+            nofmt::pls!([
+                // Zero vector
+                cells[self.index(x, y)].f[0],
+                // Carindal Vectors
+                cells[self.index(x - 1, y)].f[1],
+                cells[self.index(x, y + 1)].f[2],
+                cells[self.index(x + 1, y)].f[3],
+                cells[self.index(x, y - 1)].f[4],
+                // Diagonal Vectors
+                cells[self.index(x - 1, y + 1)].f[5],
+                cells[self.index(x + 1, y + 1)].f[6],
+                cells[self.index(x + 1, y - 1)].f[7],
+                cells[self.index(x - 1, y - 1)].f[8],
+            ])
+        }
+        // Bottom right
+        else if x == x_limit && y == y_limit {
+            nofmt::pls!([
+                // Zero vector
+                cells[self.index(x, y)].f[0],
+                // Carindal Vectors
+                cells[self.index(x - 1, y)].f[1],
+                cells[self.index(x, y + 1)].f[2],
+                cells[self.index(x + 1, y)].f[3],
+                cells[self.index(x, y - 1)].f[4],
+                // Diagonal Vectors
+                cells[self.index(x - 1, y + 1)].f[5],
+                cells[self.index(x + 1, y + 1)].f[6],
+                cells[self.index(x + 1, y - 1)].f[7],
+                cells[self.index(x - 1, y - 1)].f[8],
+            ])
+        }
+        // Left
+        else if x == x_limit && y == y_limit {
+            let u_x = self.inlet_velocity.0;
+
+            // Speacial cases
+            nofmt::pls!([
+                // Zero vector
+                cells[self.index(x, y)].f[0],
+                // Carindal Vectors
+                f[3] + 2.0 / 3.0 * rho * u_x,
+                cells[self.index(x, y + 1)].f[2],
+                cells[self.index(x + 1, y)].f[3],
+                cells[self.index(x, y - 1)].f[4],
+                // Diagonal Vectors
+                f[7] + 1.0 / 2.0 * (f[2] - f[4]) + 1.0 / 6.0 * rho * u_x,
+                cells[self.index(x + 1, y + 1)].f[6],
+                cells[self.index(x + 1, y - 1)].f[7],
+                f[6] - 1.0 / 2.0 * (f[2] - f[4]) + 1.0 / 6.0 * rho * u_x,
+            ])
+        }
+        // Right
+        else if x == x_limit {
             // 0 Pressure case
             // Outlet (right wall)
 
+            // TODO This is wrong, find correction
             // Solve for outlet velocity
             let u_x = 1.0 - (f[0] + f[2] + f[4] + 2.0 * (f[1] + f[5] + f[8])) / rho_in;
-            let u = (u_x, 0.0);
+            let u_y = 0.0;
 
-            // pass to boundary condition
-            fixed_velocity_boundary(WallBoundary::Right, f, rho_in, u)
-        } else if y == 0 {
-            // Top Wall
-            // Only 2, 5, 6 point back into the fluid
-            // noraml is 4
-            fixed_velocity_boundary(WallBoundary::Top, f, rho, u_wall)
-        } else if y == y_limit {
-            // Bottom Wall
-            // Only 2, 5, 6 point back into the fluid
-            // normal is 2
-            fixed_velocity_boundary(WallBoundary::Bottom, f, rho, u_wall)
-        } else {
-            // Normal case
+            nofmt::pls!([
+                // Zero vector
+                cells[self.index(x, y)].f[0],
+                // Carindal Vectors
+                cells[self.index(x - 1, y)].f[1],
+                cells[self.index(x, y + 1)].f[2],
+                cells[self.index(x + 1, y)].f[3],
+                cells[self.index(x, y - 1)].f[4],
+                // Diagonal Vectors
+                cells[self.index(x - 1, y + 1)].f[5],
+                cells[self.index(x + 1, y + 1)].f[6],
+                cells[self.index(x + 1, y - 1)].f[7],
+                cells[self.index(x - 1, y - 1)].f[8],
+            ])
+        }
+        // Bottom
+        else if y == y_limit {
+            // 6 2 5 bounce back into 8 4 7 respectively
+            nofmt::pls!([
+                // Zero vector
+                cells[self.index(x, y)].f[0],
+                // Carindal Vectors
+                cells[self.index(x - 1, y)].f[1],
+                f[4],
+                cells[self.index(x + 1, y)].f[3],
+                cells[self.index(x, y + 1)].f[4],
+                // Diagonal Vectors
+                f[7] - 0.5 * (f[1] - f[3]) + 0.5 * rho * u_wall.0,
+                f[8] + 0.5 * (f[1] - f[3]) - 0.5 * rho * u_wall.0,
+                cells[self.index(x + 1, y + 1)].f[7],
+                cells[self.index(x - 1, y + 1)].f[8],
+            ])
+        }
+        // Top
+        else if y == 0 {
+            //  8 4 7 bounce back into 6 2 5 respectively
+
+            nofmt::pls!([
+                // Zero vector
+                cells[self.index(x, y)].f[0],
+                // Carindal Vectors
+                cells[self.index(x - 1, y)].f[1],
+                cells[self.index(x, y + 1)].f[2],
+                cells[self.index(x + 1, y)].f[3],
+                f[2],
+                // Diagonal Vectors
+                cells[self.index(x - 1, y + 1)].f[5],
+                cells[self.index(x + 1, y + 1)].f[6],
+                f[5] + 0.5 * (f[1] - f[3]) + 0.5 * rho * u_wall.0,
+                f[6] - 1.0 / 2.0 * (f[1] - f[3]) - 0.5 * rho * u_wall.0,
+            ])
+        }
+        // Normal case
+        else {
             nofmt::pls!([
                 // Zero vector
                 cells[self.index(x, y)].f[0],
@@ -330,8 +468,10 @@ fn fixed_velocity_boundary(wall: WallBoundary, f: &[f64; 9], rho: f64, u: (f64, 
             // ]
             let mut f_bound = *f;
             f_bound[1] = f[3] - 2.0 / 3.0 * rho * u_x;
-            f_bound[5] = f[7] + 1.0 / 2.0 * (f[2] - f[4]) - 1.0 / 2.0 * rho * u_y - 1.0 / 6.0 * rho * u_x;
-            f_bound[8] = f[6] - 1.0 / 2.0 * (f[2] - f[4]) + 1.0 / 2.0 * rho * u_y - 1.0 / 6.0 * rho * u_x;
+            f_bound[5] =
+                f[7] + 1.0 / 2.0 * (f[2] - f[4]) - 1.0 / 2.0 * rho * u_y - 1.0 / 6.0 * rho * u_x;
+            f_bound[8] =
+                f[6] - 1.0 / 2.0 * (f[2] - f[4]) + 1.0 / 2.0 * rho * u_y - 1.0 / 6.0 * rho * u_x;
 
             f_bound
         }
@@ -343,8 +483,7 @@ fn fixed_velocity_boundary(wall: WallBoundary, f: &[f64; 9], rho: f64, u: (f64, 
             f_bound[6] = f[8] + 1.0 / 2.0 * (f[1] - f[3]); // - 1.0 / 2.0 * rho * u_x + 1.0 / 6.0 * rho * u_y;
 
             f_bound
-        }
-        // _ => panic!("Invalid used of boundary condition function"), // Default: No bounce-back for other directions
+        } // _ => panic!("Invalid used of boundary condition function"), // Default: No bounce-back for other directions
     }
 }
 
@@ -389,7 +528,7 @@ fn update_cell_properties(cell: &mut Cell2D9Q) {
         u.0 += f[i] * DIRS[i].0 as f64;
         u.1 += f[i] * DIRS[i].1 as f64;
     }
-    
+
     u = (u.0 / rho, u.1 / rho);
     dbg!(u);
 
